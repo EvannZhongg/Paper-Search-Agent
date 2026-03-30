@@ -36,6 +36,8 @@ Convert the user query into strict JSON with these keys:
 
 Rules:
 - Keep rewritten_query concise and searchable.
+- If the user query is not in English, rewrite it into concise, searchable academic English for English-language literature retrieval.
+- Preserve acronyms, model names, dataset names, author names, conference names, and domain-specific technical terms whenever possible.
 - Extract only explicit hard constraints into filters.
 - Use empty arrays or empty object when unavailable.
 - Do not add markdown.
