@@ -156,7 +156,6 @@
 
 注意：
 
-- `deep` 现在已经是独立于 Quick 的复杂查询深搜链路，不再只是 Quick 的后处理
 - 当前 LLM judge 是“每个检索源内逐篇判断 + criterion-level judgment”，不是仅对全局结果做一次统一判定
 - 当前硬过滤仍是第一版，主要支持 `year_from`、`year_to` 和 `is_oa`
 - 组合条件 `c4` 现在会保留独立 query 位，并参与 `criteria-and` 合取查询；相关支持阈值也已调高
@@ -331,6 +330,7 @@ scripts/
 - 继续清洗 `criteria-and` 与 criterion query phrase，减少重复、串味和过长短语
 - 为不同 provider 增加 source-aware query bundle 策略
 - 将每源送审预算从固定 `top n` 截断继续收敛为动态候选窗口，例如结合 `coverage band`、`score gap`、`percentile` 或预算上限决定送审数量
+- 作为动态送审窗口的备选实现，可保留 `(query variant, source)` 车道信息，按车道做 round-robin 送审，并对连续若干篇 `drop/低分 maybe` 的车道提前 early-stop
 - 继续增强 criterion-level evidence、hard filters 与 fulltext resolver 协同
 
 ### 6. Unpaywall 更适合作为 resolver

@@ -494,6 +494,7 @@
 - 为不同 provider 增加更细的 source-aware query bundle policy
 - 在预筛和 judge 中补更稳定的 criterion-level evidence 抽取
 - 将每源送审预算从固定 `llm_top_n_per_source` 继续收敛为动态候选窗口，例如按 `coverage band`、`score gap`、`percentile`、预算上限或 early-stop 条件决定实际送审数量
+- 作为动态送审窗口的备选实现，可保留 `(query variant, source)` 级别的候选车道，按车道 round-robin 轮转送审，并对连续若干篇不达标的车道提前 early-stop
 - 继续增强 required criteria coverage 之外的 hard filters 与排序特征
 
 这条模式最适合处理：
