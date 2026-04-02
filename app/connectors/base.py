@@ -38,7 +38,7 @@ class BaseSourceClient(ABC):
         return bool(self.settings.get(f"supports_{mode}", False))
 
     def has_credentials(self) -> bool:
-        for key in ("api_key", "email", "app_key", "app_secret", "app_code", "session_cookie"):
+        for key in ("api_key", "email", "mailto", "plus_api_token", "app_key", "app_secret", "app_code", "session_cookie"):
             if self.settings.get(key):
                 return True
         return False

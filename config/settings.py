@@ -21,10 +21,12 @@ CONFIG_FILE = ROOT_DIR / "config" / "config.yaml"
 
 _SENSITIVE_KEYS = {
     "api_key",
+    "plus_api_token",
     "app_key",
     "app_secret",
     "app_code",
     "email",
+    "mailto",
     "password",
     "session_cookie",
 }

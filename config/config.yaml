@@ -79,6 +79,7 @@ retrieval:
       openalex: 0.9
       semanticscholar: 0.9
       core: 0.75
+      crossref: 0.8
       ieee: 0.85
       arxiv: 0.7
   deep:
@@ -349,6 +350,64 @@ sources:
       cache_backend: redis
       cache_ttl_seconds: 300
       rate_limit_backend: none
+
+  crossref:
+    # 系统是否已经实现并允许加载该检索源。
+    enabled: true
+    # 是否默认对用户开放该检索源。
+    public_enabled: true
+    # 是否允许该源参与 Quick Search。
+    supports_quick: true
+    # 是否允许该源参与 Deep Search。
+    supports_deep: true
+    # 是否允许该源参与 Fusion 模式。
+    supports_fusion: true
+    # Crossref REST API 根地址。
+    base_url: https://api.crossref.org
+    # 主检索 endpoint，显式使用版本化路径。
+    works_path: /v1/works
+    # polite pool 联系邮箱，从 `.env` 注入。
+    mailto_env: CROSSREF_MAILTO
+    # Metadata Plus token，可选。
+    plus_api_token_env: CROSSREF_PLUS_API_TOKEN
+    # 当前默认要求带 mailto，避免退回匿名公共池。
+    require_mailto: true
+    # 第一版优先使用 bibliographic query 做宽覆盖元数据召回。
+    query_parameter: query.bibliographic
+    # 默认按相关性倒序返回。
+    default_sort: relevance
+    default_order: desc
+    # Crossref 单次 rows 最大为 1000；这里保持保守。
+    max_rows: 100
+    # 为了在本地按类型过滤后仍保留足够候选，适度做过采样。
+    oversample_factor: 3
+    # 第一版只保留更接近论文主结果的 work type。
+    allowed_types:
+      - journal-article
+      - proceedings-article
+      - posted-content
+    # 是否支持 DOI 精确回表与结构化元数据增强。
+    supports_doi_lookup: true
+    supports_relation_signal: true
+    supports_funder_metadata: true
+    supports_license_signal: true
+    supports_fulltext_link_signal: true
+    supports_reference_fetch: true
+    # 当前源的请求超时时间，单位秒。
+    request_timeout_seconds: 30
+    runtime:
+      # query bundle 可以并发下发，但实际请求由 runtime 做保守串行控制。
+      batch_mode: concurrent
+      cache_backend: redis
+      cache_ttl_seconds: 300
+      # 第一版按 polite pool 的保守节奏接入。
+      rate_limit_backend: redis
+      min_interval_seconds: 0.35
+      serialize_requests: true
+      lock_timeout_seconds: 45
+      blocking_timeout_seconds: 90
+      retry_backoff_seconds: 2.0
+      enable_local_fallback: true
 
   unpaywall:
     # 系统是否已经实现并允许加载该检索源。

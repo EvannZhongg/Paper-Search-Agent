@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from app.connectors import ArxivClient, CoreClient, IEEEClient, OpenAlexClient, SemanticScholarClient, UnpaywallClient
+from app.connectors import (
+    ArxivClient,
+    CoreClient,
+    CrossrefClient,
+    IEEEClient,
+    OpenAlexClient,
+    SemanticScholarClient,
+    UnpaywallClient,
+)
 from app.connectors.base import BaseSourceClient
 from app.domain.schemas import ProviderConfigSummary
 from config import get_settings
@@ -10,6 +18,7 @@ CLIENT_CLASSES: dict[str, type[BaseSourceClient]] = {
     "openalex": OpenAlexClient,
     "semanticscholar": SemanticScholarClient,
     "core": CoreClient,
+    "crossref": CrossrefClient,
     "unpaywall": UnpaywallClient,
     "arxiv": ArxivClient,
     "ieee": IEEEClient,
@@ -58,4 +67,3 @@ def get_clients_for_mode(mode: str, sources: list[str] | None = None, public_onl
             continue
         selected.append(client)
     return selected
-

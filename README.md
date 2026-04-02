@@ -10,7 +10,7 @@
 
 ## 当前状态
 
-更新日期：2026-03-31
+更新日期：2026-04-03
 
 当前可以确认的进度：
 
@@ -27,6 +27,7 @@
 - 已接入 Redis 配置化缓存与 provider 级请求控制
 - 各检索源的批处理、缓存、限流策略已开始按 provider 解耦
 - 调试输出已补 `raw_recall_count / deduped_count / finalized_count`
+- 独立前端测试页与本地代理脚本已具备，可直接联调现有 API 或导入历史 JSON 做展示验证
 
 本文后续统一使用 `deep` 指代当前这条 criterion-aware 深搜链路，不再单独使用其他别名。
 
@@ -35,7 +36,7 @@
 - 这是一个“后端原型已跑通”的项目，不再是纯设计稿
 - 但还不是“架构计划 fully landed”的版本
 - 当前更适合视为：`可运行 MVP + 待收敛的核心引擎`
-- 当前文档说明已按 2026-03-31 的代码状态重新对齐
+- 当前文档说明已按 2026-04-03 的代码状态重新对齐
 
 ## 已完成内容
 
@@ -64,6 +65,15 @@
 - `POST /v1/search/quick`
 - `POST /v1/search/deep`
 
+当前 `SearchRequest` 已支持的主要运行开关：
+
+- `sources`
+- `limit_per_source`
+- `public_only`
+- `enable_llm`
+- `enable_intent_planner`
+- `llm_top_n`
+
 当前尚未实现：
 
 - `POST /v1/search/fusion`
@@ -79,6 +89,7 @@
 - OpenAlex
 - Semantic Scholar
 - CORE
+- Crossref
 - IEEE Xplore
 - Unpaywall
 - arXiv
@@ -122,7 +133,19 @@
 
 - arXiv：`sequential batch + Redis cache + Redis 限流/锁 + 429 backoff`
 - Semantic Scholar：`Redis cache + 保守请求控制`
+- Crossref：`query.bibliographic + polite mailto + Redis cache + 保守串行请求控制`
 - OpenAlex / CORE / IEEE / Unpaywall：已接入 Redis 热缓存
+
+### 7. Crossref 接入补充
+
+这次 Crossref 接入保持了当前项目已有的 provider 规范，没有新开专用旁路。
+
+- 继续复用 `BaseSourceClient -> ProviderRuntime -> provider_registry -> quick/deep recall` 这一条主链路
+- 主搜索入口使用显式版本化的 `/v1/works`
+- 第一版默认使用 `query.bibliographic` 做宽覆盖元数据召回，并在本地收敛 `journal-article` / `proceedings-article` / `posted-content`
+- 默认要求通过 `CROSSREF_MAILTO` 进入 polite 模式，同时沿用统一 `User-Agent`
+- 请求控制继续复用统一 runtime，按保守串行节奏做 Redis 缓存、分布式锁和 `429` 退避
+- 返回结果统一映射到 `PaperResult`，并对 Crossref `abstract` 中的 JATS 标记做基础清洗
 
 ## 当前实际实现方式
 
@@ -132,8 +155,8 @@
 
 1. 对用户 query 做 intent planning
 2. 当前优先使用 LLM planner 生成 `rewritten_query`、`must_terms`、`should_terms`、`filters`、`logic` 与 `criteria`；对非英文输入会尽量生成面向英文论文源的学术英文 `rewritten_query`
-3. 生成 Quick 通道专属 query variants，当前优先使用 `intent.rewritten_query`
-4. 把 query variants 下发给可用 source，并由各 provider 自己决定批处理策略
+3. 生成 Quick 通道专属 query bundle；当前默认配置 `retrieval.quick.max_query_variants=1`，因此默认只会下发 `intent.rewritten_query` 这条 `rewritten-main` 查询
+4. 把 query bundle 下发给可用 source，并由各 provider 自己决定批处理策略
 5. 对结果做统一去重和 DOI 标准化
 6. 结合 lexical / semantic / source prior / recency / open access 做 `hybrid rerank`
 7. 按 `quick score` 排序返回
@@ -151,7 +174,7 @@
 
 1. 对用户 query 做 intent planning
 2. 当前优先使用 LLM planner 生成 `rewritten_query`、`must_terms`、`should_terms`、`filters`、`logic` 与 `criteria`；对非英文输入会尽量生成面向英文论文源的学术英文 `rewritten_query`
-3. 生成面向复杂组合查询的 `query bundle`，其中包括主查询、criteria 合取查询、紧凑放宽查询、原始 query fallback 与 criterion-focused query；query phrase 会优先压缩成 provider-friendly 检索短语，而不是自然语言提示句
+3. 生成面向复杂组合查询的 `query bundle`，当前默认会组合 `rewritten-main`、`criteria-and`、`original-query`、`must-terms`、criterion-focused query 与 `criteria-compact`；query phrase 会优先压缩成 provider-friendly 检索短语，而不是自然语言提示句
 4. 做多源召回；`deep` 已拆出 provider-specific recall/query rendering，同时尽量保持 `quick` / `deep` 内部 batch 接口统一，便于后续 `fusion`
 5. 对每个 source 的候选结果先做 criterion-level heuristic 预评分，计算 required criteria coverage 与 composite heuristic score
 6. 再做基础硬过滤，例如 `year_from/year_to/is_oa`
@@ -165,7 +188,7 @@
 - 当前 LLM judge 是“每个检索源内逐篇判断 + criterion-level judgment”，不是仅对全局结果做一次统一判定
 - 当前送审窗口已不再固定为“每源 Top-N 截断”，而是按 coverage band 和 `(query variant, source)` 车道动态轮转送审
 - 当前硬过滤仍是第一版，主要支持 `year_from`、`year_to` 和 `is_oa`
-- 组合条件 `c4` 现在会保留独立 query 位，并参与 `criteria-and` 合取查询；相关支持阈值也已调高
+- 组合条件 criterion（例如 planner 产出的 `combination` 条件）现在会保留独立 query 位，并参与 `criteria-and` 合取查询；相关支持阈值也已调高
 - heuristic/LLM 的 criterion judgment 融合已不再使用 `or + max` 直接把 coverage 抬成 `1.0`
 - `deep` 默认已不再返回所有 dedup 后候选；`retrieval.default_top_k_return` 和最终 maybe 阈值配置已开始生效
 - `query_hints` 已被进一步收紧为 1-4 个词的 provider-friendly 短语，避免指令语污染 deep query bundle
@@ -201,11 +224,11 @@ app/
   api/
   connectors/
   domain/
-frontend/
   llm/
   services/
 config/
 docs/
+frontend/
 scripts/
 ```
 
@@ -214,11 +237,17 @@ scripts/
 - 后端入口：[app/main.py](app/main.py)
 - 路由定义：[app/api/routes.py](app/api/routes.py)
 - provider 注册：[app/services/provider_registry.py](app/services/provider_registry.py)
-- 搜索主流程：[app/services/search_service.py](app/services/search_service.py)
+- 搜索服务封装：[app/services/search_service.py](app/services/search_service.py)
+- 共享检索逻辑：[app/services/search_common.py](app/services/search_common.py)
+- Quick 通道：[app/services/quick_channel.py](app/services/quick_channel.py)
+- Deep 通道：[app/services/deep_channel.py](app/services/deep_channel.py)
 - provider runtime：[app/services/provider_runtime.py](app/services/provider_runtime.py)
 - Redis runtime：[app/services/redis_runtime.py](app/services/redis_runtime.py)
 - prompt 集中管理：[app/prompts.py](app/prompts.py)
 - LLM 客户端：[app/llm/client.py](app/llm/client.py)
+- Embedding 客户端：[app/llm/embedding_client.py](app/llm/embedding_client.py)
+- 独立前端页面：[frontend/index.html](frontend/index.html)
+- 独立前端代理：[frontend/dev_server.py](frontend/dev_server.py)
 - 配置文件：[config/config.yaml](config/config.yaml)
 - 配置加载：[config/settings.py](config/settings.py)
 
@@ -243,15 +272,19 @@ scripts/
 
 ## 当前稳定性与可用性说明
 
-当前主链路实测可跑通的组合：
+基于 2026-04-01 运行 `python scripts/run_provider_probes.py` 的一次 live probe，以及 2026-04-03 对 Crossref 的补充 live 验证，可确认：
 
 - OpenAlex
 - Semantic Scholar
-- arXiv（在 Redis 缓存与 provider 限流控制下可跑通，但需严格尊重公开配额）
+- Crossref（connector 已实现；在配置 polite mailto 后，provider probe 与 quick/deep 检索已跑通）
+- arXiv（在 Redis 缓存与 provider 限流控制下 probe 成功，但需严格尊重公开配额）
+- IEEE Xplore
+- Unpaywall（probe 成功，但仍不建议作为主检索源）
 
-其余源的现状：
+补充定位说明：
 
-- CORE：connector 已实现，可作为补充召回源继续验证稳定性
+- CORE：connector 已实现，但本次 live probe 返回 `429 Too Many Requests`，更适合作为补充召回源继续验证稳定性
+- Crossref：默认要求 `CROSSREF_MAILTO`；未配置时 provider probe 会返回配置错误，但不会影响其他 source 的召回链路
 - IEEE Xplore：connector 已实现，但更适合在有明确需求或指定来源时启用
 - Unpaywall：更适合作为 `OA/fulltext resolver`，不建议当主搜索源
 - arXiv：已接入 Redis 队列、缓存和单连接控制，但热门 query 在公开配额下仍可能触发 `429`
@@ -317,7 +350,7 @@ scripts/
 - 在 prompt 中明确保留术语实体，不要把 acronym、数据集、模型名和作者名翻坏
 - 让 provider query policy 能按 source 选择 original-first、English-first 或 bilingual query variants
 - 继续把 `intent.rewritten_query` 贯穿到 Quick / Deep 的 lexical scoring 和 heuristic scoring
-- 把 `normalize_text()` 和相关 lexical scoring 改成 Unicode-aware，或至少为 CJK 增加 fallback tokenization
+- 在现有 Unicode-aware / CJK fallback tokenization 的基础上，继续收敛 bilingual lexical scoring 和 source-aware query policy
 
 ### 5. 复杂组合查询的 `deep` 已完成第一轮收敛，但仍需继续提纯
 
@@ -326,7 +359,7 @@ scripts/
 - `SearchIntent` 已新增 `criteria` 和 `logic`
 - `deep` 已默认生成面向复杂组合查询的 `query bundle`
 - `query_hints` 已收紧为 1-4 个词的 provider-friendly 检索短语，避免把整句 prompt 或指令语直接送进 bundle
-- 组合条件 `c4` 已保留独立 query 位，并进入 `criteria-and` 合取查询
+- 组合条件 criterion（例如 planner 产出的 `combination` 条件）已保留独立 query 位，并进入 `criteria-and` 合取查询
 - `quick` / `deep` 内部召回接口已开始统一，并补上 `retrieval_traces`
 - `deep` 已拆出 provider-specific recall/query rendering，不同 source 不再共享同一种 raw query
 - heuristic 预评分已支持 criterion-level support 与 required coverage
@@ -342,14 +375,14 @@ scripts/
 
 - provider-specific deep query policy 仍然偏启发式，source-aware recall 还可以继续细化
 - `2-of-4 / 3-of-4` 这类放宽组合还没有补上，仍可能漏掉“满足大部分条件但未全部显式写全”的候选
-- 复杂组合查询里 `c4` / combination criterion 的证据要求仍可继续收紧
+- 复杂组合查询里的 combination criterion 证据要求仍可继续收紧
 - `criteria-and` 和部分 criterion query phrase 仍可能有重复或串味
 - criterion-level evidence 目前主要依赖标题和摘要，还没有扩展到更丰富的 metadata / fulltext 信号
 - 当前虽已补基础调试计数，但还缺按 `(source, query_variant)` 车道展开的更细粒度观测
 
 建议方向：
 
-- 继续收紧组合条件 `c4` 的证据要求，尽量要求“明确存在独立 text retriever + graph retriever 的联合方案”
+- 继续收紧 combination criterion 的证据要求，尽量要求“明确存在独立 text retriever + graph retriever 的联合方案”
 - 在 query bundle 中增加 `2-of-4 / 3-of-4` 放宽组合，覆盖“满足大部分条件但未在标题/摘要中把所有条件都显式写全”的相关论文
 - 继续清洗 `criteria-and` 与 criterion query phrase，减少重复、串味和过长短语
 - 为不同 provider 增加更细的 source-aware query bundle 策略，并继续打磨 deep query renderer
@@ -402,6 +435,8 @@ copy .env.example .env
 - `OPENALEX_API_KEY`
 - `SEMANTIC_SCHOLAR_API_KEY`
 - `CORE_API_KEY`
+- `CROSSREF_MAILTO`
+- `CROSSREF_PLUS_API_TOKEN`
 - `UNPAYWALL_EMAIL`
 - `IEEE_XPLORE_API_KEY`
 - `REDIS_USERNAME`
@@ -562,7 +597,7 @@ python scripts/run_search.py "transformer" --mode deep
 如果不传 `--limit-per-source`：
 
 - `deep` 会读取 `config/config.yaml` 中的 `retrieval.deep.limit_per_source_default`
-- 当前默认值为 `10`
+- 当前默认值为 `30`
 
 如果不传 query，脚本会进入交互式输入：
 
@@ -576,7 +611,7 @@ python scripts/run_search.py --mode deep
 
 1. 继续补强统一标准化与去重，形成更完整的 `CanonicalPaper`
 2. 补强多语言 query planning 与 lexical normalization，形成“原始 query + 英文 rewrite + source-aware query policy”的统一策略
-3. 继续收敛已经落地的 `deep` 复杂组合查询链路，优先补齐 `2-of-4 / 3-of-4` 放宽组合、更严格的 `c4` 证据要求、更细的 source-aware recall/query policy，以及更稳定的 criterion-level evidence
+3. 继续收敛已经落地的 `deep` 复杂组合查询链路，优先补齐 `2-of-4 / 3-of-4` 放宽组合、更严格的 combination criterion 证据要求、更细的 source-aware recall/query policy，以及更稳定的 criterion-level evidence
 4. 把共享 planner / recall / dedup 继续从 `search_common.py` 中拆成更清晰的模块
 5. 继续把 `provider runtime/policy` 扩展到更细粒度的 query policy、日志和观测指标
 6. 继续增强 Quick Search 的 hybrid ranking
@@ -588,7 +623,7 @@ python scripts/run_search.py --mode deep
 
 ## 相关文档
 
-- 架构计划书：[paper_search_agent_architecture_plan_zh.md](paper_search_agent_architecture_plan_zh.md)
+- 架构计划书：[Agentic_Scholar_architecture_plan_zh.md](Agentic_Scholar_architecture_plan_zh.md)
 - Quick / Deep 流程架构图：[docs/quick_deep_search_architecture_zh.md](docs/quick_deep_search_architecture_zh.md)
 - OpenAlex 调研：[docs/openalex_api_research_zh.md](docs/openalex_api_research_zh.md)
 - Semantic Scholar 调研：[docs/semanticscholar_api_research_zh.md](docs/semanticscholar_api_research_zh.md)
