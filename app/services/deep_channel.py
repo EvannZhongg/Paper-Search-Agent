@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 from app.domain.schemas import CriterionJudgment, PaperResult, SearchCriterion, SearchIntent, SearchRequest, SearchResponse
 from app.llm import LLMClient
 from app.prompts import DEEP_JUDGE_SYSTEM_PROMPT, DEEP_JUDGE_USER_PROMPT, render_prompt
 from app.services.search_common import (
+    add_timing_ms,
     assess_criteria_match,
     build_query_bundle,
     clamp_score,
     dedup_results,
+    elapsed_ms,
+    finalize_timings_ms,
     get_channel_settings,
     get_retrieval_settings,
+    max_timing_ms,
     plan_search_intent,
     recall_results_by_source,
     result_lane_keys,
@@ -594,10 +599,13 @@ async def _llm_judge(
 async def _judge_source_results(
     query: str,
     intent: SearchIntent,
+    source_name: str,
     source_results: list[PaperResult],
     request: SearchRequest,
     channel_settings: dict[str, Any],
-) -> list[PaperResult]:
+) -> tuple[str, list[PaperResult], dict[str, float]]:
+    source_timings_ms: dict[str, float] = {}
+    total_started_at = time.perf_counter()
     llm_client = LLMClient()
     llm_enabled = request.enable_llm and llm_client.is_configured()
     llm_weight = float(channel_settings.get("llm_weight", 0.7))
@@ -608,6 +616,7 @@ async def _judge_source_results(
 
     candidates: list[PaperResult] = []
     dropped: list[PaperResult] = []
+    heuristic_prefilter_started_at = time.perf_counter()
     for result in source_results:
         (
             heuristic_score,
@@ -643,6 +652,7 @@ async def _judge_source_results(
         candidates.append(result)
 
     candidates.sort(key=lambda item: _candidate_sort_key(item, intent), reverse=True)
+    source_timings_ms["heuristic_prefilter"] = elapsed_ms(heuristic_prefilter_started_at)
 
     eligible_candidates = [
         result
@@ -654,6 +664,7 @@ async def _judge_source_results(
     ]
     judged_ids: set[int] = set()
 
+    llm_window_started_at = time.perf_counter()
     if llm_enabled and eligible_candidates:
         judged_ids = await _run_dynamic_llm_window(
             scoring_query,
@@ -665,7 +676,9 @@ async def _judge_source_results(
             heuristic_weight,
             llm_weight,
         )
+    source_timings_ms["llm_window"] = elapsed_ms(llm_window_started_at)
 
+    finalize_unjudged_started_at = time.perf_counter()
     for result in candidates:
         if id(result) in judged_ids and llm_enabled:
             continue
@@ -681,25 +694,69 @@ async def _judge_source_results(
         else:
             result.reason = f"{result.reason}; llm judge disabled or unavailable"
 
-    return candidates + dropped
+    source_timings_ms["finalize_unjudged"] = elapsed_ms(finalize_unjudged_started_at)
+    source_timings_ms["total"] = elapsed_ms(total_started_at)
+    return source_name, candidates + dropped, source_timings_ms
 
 
 async def run_deep_channel(request: SearchRequest) -> SearchResponse:
-    intent = await plan_search_intent(request.query, request)
-    channel_settings = get_channel_settings("deep")
-    query_bundle = build_query_bundle("deep", request, intent)
-    results_by_source, used_sources, raw_recall_count = await recall_results_by_source("deep", query_bundle, request)
+    timings_ms: dict[str, float] = {}
+    total_started_at = time.perf_counter()
 
+    step_started_at = time.perf_counter()
+    intent = await plan_search_intent(request.query, request)
+    timings_ms["plan_intent"] = elapsed_ms(step_started_at)
+    channel_settings = get_channel_settings("deep")
+
+    step_started_at = time.perf_counter()
+    query_bundle = build_query_bundle("deep", request, intent)
+    timings_ms["build_query_bundle"] = elapsed_ms(step_started_at)
+
+    step_started_at = time.perf_counter()
+    results_by_source, used_sources, raw_recall_count, recall_source_timings_ms = await recall_results_by_source(
+        "deep",
+        query_bundle,
+        request,
+    )
+    timings_ms["recall"] = elapsed_ms(step_started_at)
+    for source_name, source_elapsed_ms in recall_source_timings_ms.items():
+        timings_ms[f"recall_source_{source_name}"] = source_elapsed_ms
+
+    step_started_at = time.perf_counter()
     judged_groups = await asyncio.gather(
         *(
-            _judge_source_results(request.query, intent, source_results, request, channel_settings)
-            for source_results in results_by_source.values()
+            _judge_source_results(request.query, intent, source_name, source_results, request, channel_settings)
+            for source_name, source_results in results_by_source.items()
         )
     )
-    merged_results = [result for group in judged_groups for result in group]
+    timings_ms["judge_and_score"] = elapsed_ms(step_started_at)
+
+    judge_timing_sums: dict[str, float] = {}
+    judge_timing_max: dict[str, float] = {}
+    merged_results: list[PaperResult] = []
+    for source_name, source_results, source_timings_ms in judged_groups:
+        merged_results.extend(source_results)
+        for timing_key, timing_value in source_timings_ms.items():
+            add_timing_ms(judge_timing_sums, timing_key, timing_value)
+            max_timing_ms(judge_timing_max, timing_key, timing_value)
+            timings_ms[f"judge_source_{source_name}_{timing_key}"] = timing_value
+
+    for timing_key in ("heuristic_prefilter", "llm_window", "finalize_unjudged", "total"):
+        sum_value = judge_timing_sums.get(timing_key)
+        max_value = judge_timing_max.get(timing_key)
+        if sum_value is not None:
+            summary_key = f"judge_{timing_key}_sum" if timing_key != "total" else "judge_source_total_sum"
+            timings_ms[summary_key] = sum_value
+        if max_value is not None:
+            summary_key = f"judge_{timing_key}_max" if timing_key != "total" else "judge_source_total_max"
+            timings_ms[summary_key] = max_value
+
+    step_started_at = time.perf_counter()
     deduped = dedup_results(merged_results)
+    timings_ms["dedup"] = elapsed_ms(step_started_at)
 
     decision_priority = {"keep": 2, "maybe": 1, "drop": 0}
+    step_started_at = time.perf_counter()
     deduped.sort(
         key=lambda item: (
             decision_priority.get(item.decision or "drop", 0),
@@ -709,7 +766,13 @@ async def run_deep_channel(request: SearchRequest) -> SearchResponse:
         ),
         reverse=True,
     )
+    timings_ms["sort"] = elapsed_ms(step_started_at)
+
+    step_started_at = time.perf_counter()
     finalized_results = _finalize_deep_results(deduped, intent, channel_settings)
+    timings_ms["finalize"] = elapsed_ms(step_started_at)
+    timings_ms["total"] = elapsed_ms(total_started_at)
+    timings_ms = finalize_timings_ms(timings_ms)
 
     return SearchResponse(
         query=request.query,
@@ -720,6 +783,7 @@ async def run_deep_channel(request: SearchRequest) -> SearchResponse:
         raw_recall_count=raw_recall_count,
         deduped_count=len(deduped),
         finalized_count=len(finalized_results),
+        timings_ms=timings_ms,
         intent=intent,
         query_bundle=query_bundle,
         results=finalized_results,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 import re
+import time
 import unicodedata
 from datetime import datetime
 from typing import Any, Iterable
@@ -111,6 +112,22 @@ def get_channel_settings(channel: str) -> dict[str, Any]:
     retrieval_settings = get_retrieval_settings()
     channel_settings = retrieval_settings.get(channel, {})
     return channel_settings if isinstance(channel_settings, dict) else {}
+
+
+def elapsed_ms(started_at: float) -> float:
+    return max(0.0, (time.perf_counter() - started_at) * 1000.0)
+
+
+def add_timing_ms(timings: dict[str, float], key: str, value: float) -> None:
+    timings[key] = timings.get(key, 0.0) + max(0.0, value)
+
+
+def max_timing_ms(timings: dict[str, float], key: str, value: float) -> None:
+    timings[key] = max(timings.get(key, 0.0), max(0.0, value))
+
+
+def finalize_timings_ms(timings: dict[str, float]) -> dict[str, float]:
+    return {key: round(value, 2) for key, value in timings.items()}
 
 
 def resolve_limit_per_source(mode: str, request: SearchRequest) -> int:
@@ -1158,19 +1175,26 @@ async def recall_results_by_source(
     mode: str,
     query_bundle: list[QueryBundleItem],
     request: SearchRequest,
-) -> tuple[dict[str, list[PaperResult]], list[str], int]:
+) -> tuple[dict[str, list[PaperResult]], list[str], int, dict[str, float]]:
+    async def timed_batch_search(client: Any) -> tuple[str, list[PaperResult] | Exception, float]:
+        started_at = time.perf_counter()
+        try:
+            payload = await client.batch_search(mode, query_bundle, limit=limit_per_source)
+        except Exception as exc:
+            return client.name, exc, elapsed_ms(started_at)
+        return client.name, payload, elapsed_ms(started_at)
+
     limit_per_source = resolve_limit_per_source(mode, request)
     clients = get_clients_for_mode(mode, sources=request.sources, public_only=request.public_only)
-    gathered = await asyncio.gather(
-        *(client.batch_search(mode, query_bundle, limit=limit_per_source) for client in clients),
-        return_exceptions=True,
-    )
+    gathered = await asyncio.gather(*(timed_batch_search(client) for client in clients))
 
     results_by_source: dict[str, list[PaperResult]] = {}
     used_sources: list[str] = []
     raw_recall_count = 0
+    source_timings_ms: dict[str, float] = {}
 
-    for client, client_payload in zip(clients, gathered):
+    for client_name, client_payload, client_elapsed_ms in gathered:
+        source_timings_ms[client_name] = client_elapsed_ms
         if isinstance(client_payload, Exception):
             continue
 
@@ -1178,7 +1202,7 @@ async def recall_results_by_source(
         raw_recall_count += len(source_results)
 
         if source_results:
-            used_sources.append(client.name)
-            results_by_source[client.name] = dedup_results(source_results)
+            used_sources.append(client_name)
+            results_by_source[client_name] = dedup_results(source_results)
 
-    return results_by_source, used_sources, raw_recall_count
+    return results_by_source, used_sources, raw_recall_count, source_timings_ms

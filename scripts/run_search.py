@@ -98,6 +98,12 @@ def format_score_value(value: object) -> str:
     return "-"
 
 
+def format_timing_ms_value(value: object) -> str:
+    if isinstance(value, (int, float)):
+        return f"{float(value):.2f} ms"
+    return "-"
+
+
 def format_result_summary(result: dict, index: int) -> str:
     title = result.get("title") or ""
     source = result.get("source") or ""
@@ -182,6 +188,12 @@ def format_response_summary(payload: dict) -> str:
 
     for idx, result in enumerate(payload["results"], start=1):
         lines.append(format_result_summary(result, idx))
+
+    timings_ms = payload.get("timings_ms") or {}
+    if timings_ms:
+        lines.append("timings_ms:")
+        for label, value in timings_ms.items():
+            lines.append(f"  - {label}: {format_timing_ms_value(value)}")
 
     return "\n".join(lines).rstrip() + "\n"
 

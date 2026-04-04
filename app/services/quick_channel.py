@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from app.domain.schemas import PaperResult, SearchRequest, SearchResponse
 from app.llm import EmbeddingClient
 from app.services.search_common import (
     assess_relevance,
+    elapsed_ms,
+    finalize_timings_ms,
     build_document_text,
     build_query_bundle,
     clamp_score,
@@ -55,17 +58,39 @@ async def _compute_semantic_scores(query: str, results: list[PaperResult]) -> li
 
 
 async def run_quick_channel(request: SearchRequest) -> SearchResponse:
+    timings_ms: dict[str, float] = {}
+    total_started_at = time.perf_counter()
+
+    step_started_at = time.perf_counter()
     intent = await plan_search_intent(request.query, request)
+    timings_ms["plan_intent"] = elapsed_ms(step_started_at)
     channel_settings = get_channel_settings("quick")
+
+    step_started_at = time.perf_counter()
     query_bundle = build_query_bundle("quick", request, intent)
-    results_by_source, used_sources, raw_recall_count = await recall_results_by_source("quick", query_bundle, request)
+    timings_ms["build_query_bundle"] = elapsed_ms(step_started_at)
+
+    step_started_at = time.perf_counter()
+    results_by_source, used_sources, raw_recall_count, recall_source_timings_ms = await recall_results_by_source(
+        "quick",
+        query_bundle,
+        request,
+    )
+    timings_ms["recall"] = elapsed_ms(step_started_at)
+    for source_name, source_elapsed_ms in recall_source_timings_ms.items():
+        timings_ms[f"recall_source_{source_name}"] = source_elapsed_ms
 
     all_results = [result for source_results in results_by_source.values() for result in source_results]
+    step_started_at = time.perf_counter()
     deduped = dedup_results(all_results)
+    timings_ms["dedup"] = elapsed_ms(step_started_at)
+
+    step_started_at = time.perf_counter()
     if channel_settings.get("enable_embedding_similarity", True):
         semantic_scores = await _compute_semantic_scores(intent.rewritten_query or request.query, deduped)
     else:
         semantic_scores = [0.0 for _ in deduped]
+    timings_ms["compute_semantic_scores"] = elapsed_ms(step_started_at)
 
     source_priors = channel_settings.get("source_priors", {})
     if not isinstance(source_priors, dict):
@@ -76,6 +101,7 @@ async def run_quick_channel(request: SearchRequest) -> SearchResponse:
     recency_window = int(channel_settings.get("recency_window_years", 10) or 10)
 
     ranked: list[PaperResult] = []
+    step_started_at = time.perf_counter()
     for result, semantic_score in zip(deduped, semantic_scores):
         lexical_score, matched_fields, lexical_reason = assess_relevance(intent.rewritten_query or request.query, result, intent)
         source_prior = clamp_score(float(source_priors.get(result.source, channel_settings.get("default_source_prior", 0.6))))
@@ -106,8 +132,13 @@ async def run_quick_channel(request: SearchRequest) -> SearchResponse:
         result.decision = "keep"
         result.confidence = clamp_score(0.45 + 0.5 * quick_score)
         ranked.append(result)
+    timings_ms["rank"] = elapsed_ms(step_started_at)
 
+    step_started_at = time.perf_counter()
     ranked.sort(key=lambda item: (item.scores.get("quick", 0.0), item.confidence or 0.0), reverse=True)
+    timings_ms["sort"] = elapsed_ms(step_started_at)
+    timings_ms["total"] = elapsed_ms(total_started_at)
+    timings_ms = finalize_timings_ms(timings_ms)
 
     return SearchResponse(
         query=request.query,
@@ -118,6 +149,7 @@ async def run_quick_channel(request: SearchRequest) -> SearchResponse:
         raw_recall_count=raw_recall_count,
         deduped_count=len(deduped),
         finalized_count=len(ranked),
+        timings_ms=timings_ms,
         intent=intent,
         query_bundle=query_bundle,
         results=ranked,

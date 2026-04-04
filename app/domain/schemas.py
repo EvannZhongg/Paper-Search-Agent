@@ -97,6 +97,7 @@ class SearchResponse(BaseModel):
     raw_recall_count: int = Field(default=0, ge=0)
     deduped_count: int = Field(default=0, ge=0)
     finalized_count: int = Field(default=0, ge=0)
+    timings_ms: dict[str, float] = Field(default_factory=dict)
     intent: SearchIntent
     query_bundle: list[QueryBundleItem] = Field(default_factory=list)
     results: list[PaperResult]
